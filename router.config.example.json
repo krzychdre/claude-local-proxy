@@ -1,0 +1,30 @@
+{
+  "port": 8787,
+  "host": "127.0.0.1",
+
+  "anthropicBaseUrl": "https://api.anthropic.com",
+  "anthropicUpstreamKey": "",
+  "anthropicCredsFallback": true,
+
+  "localBaseUrl": "http://<local-gateway-host>:<port>",
+  "localFlavor": "anthropic",
+  "localModel": "Qwen3.6-27B",
+  "localApiKey": "<local-api-key-if-needed>",
+
+  "localTiers": ["sonnet", "haiku"],
+
+  "localBackends": [
+    {
+      "tier": "sonnet",
+      "model": "Qwen3.6-27B"
+    },
+    {
+      "tier": "haiku",
+      "model": "Qwen3.6-27B"
+    }
+  ],
+
+  "countTokens": "estimate",
+  "logUsage": true,
+  "logLevel": "info"
+}

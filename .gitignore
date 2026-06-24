@@ -1,0 +1,26 @@
+# Config with live secrets — copy from router.config.example.json
+router.config.json
+
+# Logs
+router.log
+*.log
+
+# Settings profile (may contain local paths/secrets)
+claude-settings.localrouter.json
+
+# Node
+node_modules/
+
+# Compiled single-binary build output
+dist/
+
+# PID file
+router.pid
+
+# Usage log (if configured)
+usage_*.jsonl
+
+.maestro
+.claude
+router.config.json
+claude-settings.localrouter.json

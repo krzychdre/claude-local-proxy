@@ -1,0 +1,42 @@
+# Claude Code model-router — user-level systemd service.
+#
+# This unit runs the compiled single binary, so it does NOT depend on the
+# project folder being present. Build & install the binary first:
+#   bun run build:install        # -> ~/.local/bin/claude-router
+# Put your config at the XDG location the binary looks for:
+#   mkdir -p ~/.config/claude-router
+#   cp router.config.example.json ~/.config/claude-router/config.json   # then edit
+#
+# Install the service:
+#   mkdir -p ~/.config/systemd/user
+#   cp claude-router.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now claude-router
+#
+# To keep it running after logout:
+#   loginctl enable-linger $USER
+#
+# View logs:
+#   journalctl --user -u claude-router -f
+#
+# If you prefer to set LOCAL_API_KEY via environment instead of the config file,
+# uncomment the Environment= line below and remove the key from the config.
+
+[Unit]
+Description=Claude Code model-router proxy
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/claude-router
+WorkingDirectory=%h
+Restart=on-failure
+RestartSec=2
+Environment=ROUTER_LOG_LEVEL=info
+# Config is read from ~/.config/claude-router/config.json by default.
+# Override with an explicit path if you keep it elsewhere:
+# Environment=ROUTER_CONFIG=%h/.config/claude-router/config.json
+# Environment=LOCAL_API_KEY=your-key-here
+
+[Install]
+WantedBy=default.target
