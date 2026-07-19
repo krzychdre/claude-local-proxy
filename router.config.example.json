@@ -8,7 +8,6 @@
 
   "localBaseUrl": "http://<local-gateway-host>:<port>",
   "localFlavor": "anthropic",
-  "localModel": "Qwen3.6-27B",
   "localApiKey": "<local-api-key-if-needed>",
 
   "localTiers": ["sonnet", "haiku"],
@@ -24,7 +23,7 @@
     }
   ],
 
-  "countTokens": "estimate",
+  "countTokens": "anthropic",
   "logUsage": true,
   "logLevel": "info"
 }

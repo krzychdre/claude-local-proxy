@@ -7,12 +7,11 @@ local LLM** while **everything else goes to the real Anthropic API as usual**.
 (Opus/Sonnet/Haiku) go there. This proxy sits in that spot and splits traffic by
 the `model` field on each request:
 
-```text
-                          ┌─────────────────────────────────────────┐
-                          │            router.mjs  :8787            │
-   Claude Code  ─────────►│  model contains "sonnet"? ──► LOCAL LLM  │
-   (ANTHROPIC_BASE_URL)   │  otherwise (opus, ...)    ──► api.anthropic.com
-                          └─────────────────────────────────────────┘
+```mermaid
+flowchart LR
+  CC["Claude Code<br/>ANTHROPIC_BASE_URL"] --> R{"model in localTiers?"}
+  R -- yes --> L["Local LLM<br/>anthropic / openai flavor"]
+  R -- "no (opus, …)" --> A["api.anthropic.com<br/>pass-through"]
 ```
 
 - **Opus / everything not in `localTiers`** → transparent reverse proxy to
@@ -25,8 +24,7 @@ the `model` field on each request:
 
 ## Quick start
 
-1. **Set your local endpoint** in `router.config.json` (see below).
-   Copy the example file and fill in your values:
+1. **Set your local endpoint** in `router.config.json`:
 
    ```bash
    cp router.config.example.json router.config.json
@@ -36,10 +34,9 @@ the `model` field on each request:
 2. **Run the proxy:**
 
    ```bash
-   ./start.sh            # foreground
-   ./start.sh --bg       # background -> router.log
-   ./start.sh stop       # stop background process
-   ./start.sh status     # check if running
+   npm start            # foreground: node router.mjs
+   # …or directly:
+   node router.mjs
    ```
 
    Sanity check: `curl -s localhost:8787/health`
@@ -52,13 +49,57 @@ the `model` field on each request:
    cp claude-settings.localrouter.json ~/.claude/settings.json
    ```
 
-   Start a new Claude Code session. To go back: `cp ~/.claude/settings.json.anthropic ~/.claude/settings.json`.
+   Start a new Claude Code session. To revert:
+   `cp ~/.claude/settings.json.anthropic ~/.claude/settings.json`.
 
 ## Secrets
 
 `router.config.json` contains your local API key and is listed in `.gitignore`.
 Never commit it — use `router.config.example.json` as a template. Alternatively,
 set `LOCAL_API_KEY` as an environment variable (see env overrides below).
+
+## Architecture
+
+The proxy is a small set of focused ES modules. `router.mjs` is just the
+entrypoint (`loadConfig()` → `startServer()`); the logic lives in `lib/`:
+
+```text
+router.mjs              entrypoint
+lib/config.mjs          defaults, config-file search chain, env overrides
+lib/server.mjs          HTTP server: classify request → route → dispatch → error mapping
+lib/router.mjs          pickUpstream(): the routing decision (model → backend)
+lib/auth.mjs            upstream auth (relay / OAuth fallback / local-key injection)
+lib/http.mjs            fetch-with-timeout, header copy, body reader, URL builders
+lib/sse.mjs             the single SSE parser
+lib/translate.mjs       Anthropic ↔ OpenAI translation (request, response, streaming)
+lib/upstream.mjs        transparent reverse proxy + usage teeing
+lib/backends/
+  index.mjs             backend-handler registry (the extensibility seam)
+  anthropic.mjs         pass-through to api.anthropic.com
+  localAnthropic.mjs    pass-through to an Anthropic-flavored local gateway
+  localOpenai.mjs       translate to OpenAI Chat Completions (+ streaming)
+```
+
+**Routing & dispatch.** For each request, `server.mjs` classifies the URL and
+parsed body, calls `pickUpstream(model)` to get either the literal `'anthropic'`
+or a local backend config `{ model, baseUrl, flavor, apiKey, tier }`, then hands
+a request context to the matching backend handler. The server contains **no
+per-flavour branching** — that lives inside each handler behind a single
+`handle(ctx)` interface.
+
+**Open for extension.** Backends are plain objects registered by key in
+`lib/backends/index.mjs`. Adding a new local flavor (e.g. an Ollama-native
+handler) is a new file plus one registry line; the server, router, and existing
+handlers are untouched. Adding a tier-to-model mapping is a `localBackends`
+entry — no code changes.
+
+**State.** Each request runs in its own `ctx` closure; the only module-level
+shared state is the loaded config (set once at startup), a cached OAuth token,
+and a tool-id counter. All run on Node's single-threaded event loop, so
+concurrent requests interleave only at `await` points — and none of the shared
+mutations straddle one. No locks are needed.
+
+Zero dependencies. Requires Node ≥ 18 (uses global `fetch` + web streams).
 
 ## Configuration (`router.config.json`)
 
@@ -135,9 +176,9 @@ If Opus requests ever come back `401`, you have two fallbacks:
 
 ## Package as a single binary
 
-The router is one zero-dependency `.mjs` file, so it compiles to a single
-self-contained executable — no Node, no `node_modules`, no project folder needed
-on the target machine. Build it with [Bun](https://bun.sh) via the Makefile:
+The proxy compiles to a single self-contained executable — no Node, no
+`node_modules`, no project folder needed on the target machine. Build it with
+[Bun](https://bun.sh) via the Makefile:
 
 ```bash
 make           # -> dist/claude-router  (one ~98 MB executable)
@@ -148,6 +189,10 @@ make help      # list all targets
 
 (`bun run build` / `bun run build:install` are kept as aliases that call `make`.)
 
+Bun bundles the `router.mjs` entrypoint together with all its `lib/` imports at
+compile time, so the modular source tree produces one binary just as the old
+single-file version did.
+
 **On size.** The ~98 MB is the bun runtime baked into the binary — that's the
 price of "needs nothing installed." It can't be `strip`-ped: bun appends its JS
 payload + a locator trailer to the executable, and stripping relocates that
@@ -155,7 +200,7 @@ trailer so the binary stops running its own code (it also doesn't shrink it —
 the size isn't ELF symbols). To move it around, `make dist` xz-compresses it to
 ~24 MB; decompress on the target with `xz -d claude-router.xz`. If a small
 on-disk footprint matters more than zero dependencies, install the script as a
-Node CLI instead (`npm i -g .`, ~32 KB, but needs Node ≥18 on the box).
+Node CLI instead (`npm i -g .`, needs Node ≥18 on the box).
 
 Then run it from anywhere:
 
@@ -222,4 +267,6 @@ For a system-level service (e.g. shared across users), copy the unit to
 npm test
 ```
 
-Self-contained mock upstreams — no external services needed.
+Self-contained mock upstreams — no external services needed. Three suites cover
+routing & model rewrite, the OpenAI translation path (streaming + tool calls),
+auth stripping, `count_tokens`, and token-usage logging.
