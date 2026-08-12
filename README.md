@@ -156,8 +156,8 @@ client never sees a `tool_use` it cannot run.
 ```json
 "webSearch": {
   "mode": "local",
-  "searxUrl": "http://192.168.50.194:8888",
-  "crawl4aiUrl": "http://192.168.50.194:11235",
+  "searxUrl": "http://127.0.0.1:8888",
+  "crawl4aiUrl": "http://127.0.0.1:11235",
   "crawl4aiToken": "<token>"
 }
 ```
@@ -196,10 +196,10 @@ Caveats once the proxy is serving a request's web tools:
 { "localFlavor": "openai", "localBaseUrl": "http://127.0.0.1:11434", "localModel": "qwen2.5-coder:14b", "localApiKey": "ollama" }
 ```
 
-### Example: an existing Anthropic-compatible gateway (like your GLM box)
+### Example: an existing Anthropic-compatible gateway on your LAN
 
 ```json
-{ "localFlavor": "anthropic", "localBaseUrl": "http://192.168.50.194:11111", "localModel": "GLM-4.7-REAP-265B", "localApiKey": "<token>" }
+{ "localFlavor": "anthropic", "localBaseUrl": "http://10.0.0.10:11111", "localModel": "my-local-model", "localApiKey": "<token>" }
 ```
 
 ## How auth works
@@ -227,7 +227,7 @@ If Opus requests ever come back `401`, you have two fallbacks:
   `claude-sonnet-4-6`, etc. all classify correctly with no model-name overrides.
 
 - The proxy logs every routing decision at `info` level, e.g.
-  `POST /v1/messages model=claude-sonnet-4-6 -> local(anthropic:GLM-4.7-FP8)`.
+  `POST /v1/messages model=claude-sonnet-4-6 -> local(anthropic:my-local-model)`.
 
 - **Upstream timeouts** are time-to-first-byte only (default 2 minutes). Once
   the response starts streaming, there is no timeout — long generations are never
