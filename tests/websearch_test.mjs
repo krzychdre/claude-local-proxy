@@ -19,20 +19,27 @@ const REMOTE_MODEL = 'claude-opus-4-6';
 // --- mock local LLM (OpenAI flavor) ---
 // First round: asks for a web_search. Second round (a `role: tool` message is
 // present): answers in text. Every request body is recorded for assertions.
+// The prompt selects the scenario: HALUCYNACJA makes it call a tool that was
+// never offered, POBIERZ makes it call web_fetch, otherwise it searches when
+// search is on offer.
 const seen = [];
 const openai = http.createServer((req, res) => {
   let b = ''; req.on('data', c => b += c); req.on('end', () => {
     const body = JSON.parse(b || '{}');
     seen.push(body);
     const answered = (body.messages || []).some(m => m.role === 'tool');
+    const asked = JSON.stringify(body.messages || []);
     const offersSearch = (body.tools || []).some(t => t.function?.name === 'web_search');
+    const call = (name, args) => JSON.stringify({
+      id: 'oai_1',
+      choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: `call_${name}`, type: 'function', function: { name, arguments: args } }] }, finish_reason: 'tool_calls' }],
+      usage: { prompt_tokens: 10, completion_tokens: 5 },
+    });
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    if (offersSearch && !answered) {
-      return res.end(JSON.stringify({
-        id: 'oai_1',
-        choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'web_search', arguments: '{"query":"crawl4ai docs"}' } }] }, finish_reason: 'tool_calls' }],
-        usage: { prompt_tokens: 10, completion_tokens: 5 },
-      }));
+    if (!answered) {
+      if (asked.includes('HALUCYNACJA')) return res.end(call('web_fetch', '{"url":"https://pypi.org/project/x/"}'));
+      if (asked.includes('POBIERZ')) return res.end(call('web_fetch', '{"url":"https://example.com"}'));
+      if (offersSearch) return res.end(call('web_search', '{"query":"crawl4ai docs"}'));
     }
     res.end(JSON.stringify({
       id: 'oai_2',
@@ -91,10 +98,22 @@ const anthropic = http.createServer((req, res) => {
   });
 });
 
+// --- mock crawl4ai ---
+let lastFetch = null;
+const crawl = http.createServer((req, res) => {
+  let b = ''; req.on('data', c => b += c); req.on('end', () => {
+    lastFetch = { path: req.url, body: JSON.parse(b || '{}'), auth: req.headers.authorization };
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ markdown: '# Example Domain\n\nTreść pobranej strony.' }));
+  });
+});
+
 await new Promise(r => openai.listen(0, r));
 await new Promise(r => searx.listen(0, r));
 await new Promise(r => anthropic.listen(0, r));
-const OAI = openai.address().port, SEARX = searx.address().port, ANTH = anthropic.address().port;
+await new Promise(r => crawl.listen(0, r));
+const OAI = openai.address().port, SEARX = searx.address().port;
+const ANTH = anthropic.address().port, CRAWL = crawl.address().port;
 
 const baseEnv = {
   ...process.env,
@@ -115,6 +134,13 @@ const spawnRouter = (port, env) => spawn('node', [ROUTER], {
 const offProc = spawnRouter(8801, { WEB_SEARCH_MODE: 'off' });
 const locProc = spawnRouter(8802, { WEB_SEARCH_MODE: 'local', SEARXNG_URL: `http://127.0.0.1:${SEARX}` });
 const alwProc = spawnRouter(8804, { WEB_SEARCH_MODE: 'always', SEARXNG_URL: `http://127.0.0.1:${SEARX}` });
+// Both endpoints configured, so web_fetch is served too.
+const bothProc = spawnRouter(8806, {
+  WEB_SEARCH_MODE: 'local',
+  SEARXNG_URL: `http://127.0.0.1:${SEARX}`,
+  CRAWL4AI_URL: `http://127.0.0.1:${CRAWL}`,
+  CRAWL4AI_API_TOKEN: 'tok-123',
+});
 await new Promise(r => setTimeout(r, 700));
 
 let pass = 0, fail = 0;
@@ -265,7 +291,50 @@ const post = (port, body) => fetch(`http://127.0.0.1:${port}/v1/messages`, {
   proc.kill();
 }
 
+// 9) A tool the model was never offered is answered here, not handed to the
+//    client — the client has no such tool either. Regression: the search tool's
+//    description used to advertise web_fetch even when it was not served, and
+//    the invented call was passed straight through.
+{
+  seen.length = 0;
+  const r = await post(8802, {
+    model: 'claude-sonnet-4-6', max_tokens: 50,
+    tools: [WEB_SEARCH_STUB],
+    messages: [{ role: 'user', content: 'HALUCYNACJA: wymyśl narzędzie' }],
+  });
+  const j = await r.json();
+  const desc = seen[0]?.tools?.[0]?.function?.description || '';
+
+  ok('search-only: description does not advertise web_fetch', !/web_fetch/.test(desc));
+  ok('invented tool: never reaches the client', !JSON.stringify(j).includes('"tool_use"'));
+  ok('invented tool: answered with an error the model can read',
+    (seen[1]?.messages || []).some(m => m.role === 'tool' && /no tool by that name/.test(m.content)));
+  ok('invented tool: the turn still completes', j.content?.[0]?.text === 'Odpowiedź po wyszukaniu.');
+}
+
+// 10) With crawl4ai configured, web_fetch is advertised and actually runs
+{
+  seen.length = 0; lastFetch = null;
+  const r = await post(8806, {
+    model: 'claude-sonnet-4-6', max_tokens: 50,
+    tools: [WEB_SEARCH_STUB, WEB_FETCH_STUB],
+    messages: [{ role: 'user', content: 'POBIERZ https://example.com' }],
+  });
+  const j = await r.json();
+  const desc = (seen[0]?.tools || []).find(t => t.function?.name === 'web_search')?.function?.description || '';
+
+  ok('both served: description points at web_fetch', /web_fetch/.test(desc));
+  ok('both served: web_fetch offered with a url schema',
+    !!(seen[0]?.tools || []).find(t => t.function?.name === 'web_fetch')?.function?.parameters?.properties?.url);
+  ok('web_fetch: crawl4ai hit on /md with the model’s URL',
+    lastFetch?.path === '/md' && lastFetch?.body?.url === 'https://example.com');
+  ok('web_fetch: token sent as a bearer', lastFetch?.auth === 'Bearer tok-123');
+  ok('web_fetch: markdown fed back to the model',
+    (seen[1]?.messages || []).some(m => m.role === 'tool' && /Treść pobranej strony/.test(m.content)));
+  ok('web_fetch: client sees only the answer', j.content?.[0]?.text === 'Odpowiedź po wyszukaniu.');
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
-offProc.kill(); locProc.kill(); alwProc.kill();
-openai.close(); searx.close(); anthropic.close();
+offProc.kill(); locProc.kill(); alwProc.kill(); bothProc.kill();
+openai.close(); searx.close(); anthropic.close(); crawl.close();
 process.exit(fail ? 1 : 0);
