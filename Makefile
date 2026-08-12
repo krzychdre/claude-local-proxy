@@ -22,6 +22,10 @@
 
 BIN      := claude-router
 SRC      := router.mjs
+# router.mjs is only the entrypoint; everything it imports lives in lib/. The
+# binary must depend on all of it, or a change under lib/ leaves make thinking
+# dist/claude-router is up to date and `make install` ships a stale build.
+SRCS     := $(SRC) $(wildcard lib/*.mjs) $(wildcard lib/backends/*.mjs)
 DIST     := dist
 OUT      := $(DIST)/$(BIN)
 
@@ -46,7 +50,7 @@ BUNFLAGS := --compile --minify
 
 build: $(OUT) ## Compile the single binary -> dist/claude-router
 
-$(OUT): $(SRC)
+$(OUT): $(SRCS)
 	@mkdir -p $(DIST)
 	$(BUN) build $(SRC) $(BUNFLAGS) --outfile $(OUT)
 	@ls -l $(OUT) | awk '{printf "built %s (%.0f MB)\n", $$9, $$5/1048576}'

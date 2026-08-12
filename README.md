@@ -70,9 +70,11 @@ lib/server.mjs          HTTP server: classify request → route → dispatch →
 lib/router.mjs          pickUpstream(): the routing decision (model → backend)
 lib/auth.mjs            upstream auth (relay / OAuth fallback / local-key injection)
 lib/http.mjs            fetch-with-timeout, header copy, body reader, URL builders
-lib/sse.mjs             the single SSE parser
+lib/sse.mjs             the single SSE parser, plus the message → SSE emitter
 lib/translate.mjs       Anthropic ↔ OpenAI translation (request, response, streaming)
 lib/upstream.mjs        transparent reverse proxy + usage teeing
+lib/websearch.mjs       policy for Anthropic's server-side web tools (off / local / always)
+lib/oneShot.mjs         one buffered call to either upstream, as an Anthropic message
 lib/backends/
   index.mjs             backend-handler registry (the extensibility seam)
   anthropic.mjs         pass-through to api.anthropic.com
@@ -115,6 +117,7 @@ Zero dependencies. Requires Node ≥ 18 (uses global `fetch` + web streams).
 | `localApiKey` | Auth sent to the local server (Ollama ignores it; vLLM/LM Studio may need it). |
 | `localTiers` | Substrings that route to local. Default `["sonnet"]`. Add `"haiku"` to also send background tasks local. |
 | `localBackends` | Optional per-tier overrides. Array of `{ tier, model, baseUrl?, flavor?, apiKey? }`. |
+| `webSearch` | Who serves Claude Code's WebSearch/WebFetch — see [Web tools](#web-tools-websearch--webfetch) below. |
 | `countTokens` | `"estimate"` (no Anthropic dependency for the local path) or `"anthropic"`. |
 | `logUsage` | Log token usage (input/output + cache) already present in each response. No extra API calls/cost. Default `false`. |
 | `usageLogFile` | If set, also append one JSON record per request to this path (for per-session token tallies). |
@@ -125,7 +128,67 @@ Zero dependencies. Requires Node ≥ 18 (uses global `fetch` + web streams).
 Any field can be overridden by env var for one-off runs: `PORT`, `LOCAL_BASE_URL`,
 `LOCAL_FLAVOR`, `LOCAL_MODEL`, `LOCAL_API_KEY`, `LOCAL_TIERS`,
 `ANTHROPIC_UPSTREAM_URL`, `ANTHROPIC_UPSTREAM_KEY`, `ROUTER_LOG_LEVEL`,
-`ROUTER_LOG_USAGE`, `ROUTER_USAGE_LOG_FILE`, `MAX_BODY_BYTES`, `UPSTREAM_TIMEOUT_MS`.
+`ROUTER_LOG_USAGE`, `ROUTER_USAGE_LOG_FILE`, `MAX_BODY_BYTES`, `UPSTREAM_TIMEOUT_MS`,
+`WEB_SEARCH_MODE`, `SEARXNG_URL`, `CRAWL4AI_URL`, `CRAWL4AI_API_TOKEN`.
+
+## Web tools (WebSearch / WebFetch)
+
+Claude Code's `WebSearch` and `WebFetch` are Anthropic **server tools**: the
+request carries only a typed stub — `{"type": "web_search_20250305", "name":
+"web_search"}`, no input schema — because the search runs inside Anthropic's own
+API, which splices `server_tool_use` / `web_search_tool_result` blocks into the
+reply. The client executes nothing. A local gateway has none of that, so on the
+local route the stub is at best ignored and at worst a 400.
+
+`webSearch.mode` decides who serves those tools. The three modes differ only in
+*which routes* the proxy takes over:
+
+| Mode | Local route (`localTiers` models) | Anthropic route (everything else) |
+| ---- | --------------------------------- | --------------------------------- |
+| `"off"` | Stubs stripped before the request leaves the proxy, so the model is never offered a tool nobody can run. Streaming untouched. | Untouched — Anthropic's own search runs as usual. |
+| `"local"` **(default)** | Each stub swapped for a real function tool the proxy executes: `web_search` against SearXNG, `web_fetch` against crawl4ai. | Untouched — Anthropic's own search runs as usual. |
+| `"always"` | Same as `"local"`. | Also served by your SearXNG/crawl4ai, so no query or page URL leaves the network even for Anthropic models. |
+
+When the proxy serves the tools it loops internally — call → search → feed the
+results back → call again — and hands the client only the finished answer. The
+client never sees a `tool_use` it cannot run.
+
+```json
+"webSearch": {
+  "mode": "local",
+  "searxUrl": "http://192.168.50.194:8888",
+  "crawl4aiUrl": "http://192.168.50.194:11235",
+  "crawl4aiToken": "<token>"
+}
+```
+
+Tuning keys: `maxResults` (5), `snippetChars` (400), `fetchChars` (20000),
+`maxRounds` (3), `timeoutMs` (30000).
+
+A tool whose endpoint is left empty is not served, so `mode: "local"` with only
+`searxUrl` set gives you search and no fetch. What happens to that unserved stub
+depends on the route: on the local route it is stripped (nothing there could run
+it), on the Anthropic route it is left in place (Anthropic still can). With
+neither endpoint configured, every mode behaves like `"off"`.
+
+**Prefer `"off"` plus MCP when you can.** A SearXNG/crawl4ai MCP server gives the
+model *client*-side tools, which work on every route, keep streaming intact, and
+show up in the transcript as ordinary tool calls. The in-proxy modes exist for
+the case where the client isn't Claude Code, or no MCP server is available.
+
+Caveats once the proxy is serving a request's web tools:
+
+- **No incremental streaming on affected requests.** The proxy has to see the
+  whole reply before it knows whether a search is needed, so it buffers and
+  replays the answer as SSE at the end. Requests that carry no web stub are
+  unaffected. In `"always"` this now applies to Anthropic-routed requests too,
+  which is the main reason not to switch it on by default.
+- **SearXNG must have its JSON API enabled** (`search.formats` in `settings.yml`
+  must include `json`); otherwise every search returns an error string telling
+  you exactly that.
+- **`"always"` costs quality for privacy.** Anthropic's own search is tuned for
+  its models and returns citation blocks; a raw SearXNG snippet list is not the
+  same thing. Use it when keeping queries on your own network matters more.
 
 ### Example: Ollama
 
