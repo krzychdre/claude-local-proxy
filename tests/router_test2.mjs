@@ -31,7 +31,7 @@ const proc=spawn('node',[ROUTER],{env:{...process.env,
   ROUTER_CONFIG:'/dev/null',
   PORT:'8798',
   LOCAL_BASE_URL:`http://127.0.0.1:${GW}`, LOCAL_FLAVOR:'anthropic',
-  LOCAL_MODEL:'GLM-4.7-REAP-265B', LOCAL_API_KEY:'gw-secret', LOCAL_TIERS:'sonnet,haiku',
+  LOCAL_MODEL:'my-local-model', LOCAL_API_KEY:'gw-secret', LOCAL_TIERS:'sonnet,haiku',
   ANTHROPIC_UPSTREAM_URL:`http://127.0.0.1:${ANT}`, ROUTER_LOG_LEVEL:'warn',
 },stdio:['ignore','inherit','inherit']});
 await new Promise(r=>setTimeout(r,600));
@@ -42,10 +42,10 @@ const post=(m,extra={})=>fetch(base+'/v1/messages',{method:'POST',headers:{'cont
 
 { const j=await post('claude-sonnet-4-6');
   ok('sonnet -> local gateway', j.where==='local-gateway');
-  ok('  model rewritten to local', j.model==='GLM-4.7-REAP-265B');
+  ok('  model rewritten to local', j.model==='my-local-model');
   ok('  real Anthropic auth NOT leaked to gateway', j.auth==='Bearer gw-secret' && j.xapikey==='gw-secret'); }
 { const j=await post('claude-haiku-4-5');
-  ok('haiku -> local gateway', j.where==='local-gateway' && j.model==='GLM-4.7-REAP-265B'); }
+  ok('haiku -> local gateway', j.where==='local-gateway' && j.model==='my-local-model'); }
 { const j=await post('claude-opus-4-8[1m]');
   ok('opus[1m] -> real Anthropic', j.where==='anthropic');
   ok('  opus keeps real subscription auth', j.auth==='Bearer sk-ant-oat-REAL'); }
