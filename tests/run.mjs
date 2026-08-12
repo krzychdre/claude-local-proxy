@@ -11,6 +11,7 @@ const tests = [
   'router_test.mjs',     // OpenAI-flavor path: passthrough, streaming translation, tool calls, count_tokens
   'router_test2.mjs',    // Anthropic-flavor path: routing, model rewrite, auth stripping
   'usage_log_test.mjs',  // Token-usage logging (streaming + non-stream, no extra upstream calls)
+  'websearch_test.mjs',  // Server-side web tools: 'off' strips the stubs, 'local' resolves them in-proxy, 'always' does so on the Anthropic route too
 ];
 
 let totalPass = 0, totalFail = 0, suiteFail = 0;

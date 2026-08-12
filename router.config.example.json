@@ -23,6 +23,13 @@
     }
   ],
 
+  "webSearch": {
+    "mode": "local",
+    "searxUrl": "http://<searxng-host>:8888",
+    "crawl4aiUrl": "http://<crawl4ai-host>:11235",
+    "crawl4aiToken": "<crawl4ai-api-token-if-set>"
+  },
+
   "countTokens": "anthropic",
   "logUsage": true,
   "logLevel": "info"
