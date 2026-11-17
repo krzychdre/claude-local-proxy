@@ -33,7 +33,8 @@ WorkingDirectory=%h
 Restart=on-failure
 RestartSec=2
 Environment=ROUTER_LOG_LEVEL=info
-# Config is read from ~/.config/claude-router/config.json by default.
+# Config is read from ~/.config/claude-router/config.json by default, and
+# re-read whenever that file changes (no restart needed).
 # Override with an explicit path if you keep it elsewhere:
 # Environment=ROUTER_CONFIG=%h/.config/claude-router/config.json
 # Environment=LOCAL_API_KEY=your-key-here

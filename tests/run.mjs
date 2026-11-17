@@ -8,13 +8,15 @@ import path from 'node:path';
 const __dir = path.dirname(fileURLToPath(import.meta.url));
 
 const tests = [
-  'router_test.mjs',     // OpenAI-flavor path: passthrough, streaming translation, tool calls, count_tokens
-  'router_test2.mjs',    // Anthropic-flavor path: routing, model rewrite, auth stripping
+  'router_test.mjs',     // OpenAI-flavor path (translation, tool calls, count_tokens, upstream errors) + the transparent Anthropic path
+  'router_test2.mjs',    // Anthropic-flavor path: routing, model rewrite, auth swap, per-tier backends + effort mapping, /health, configs refused at startup
   'usage_log_test.mjs',  // Token-usage logging (streaming + non-stream, no extra upstream calls)
   'websearch_test.mjs',  // Server-side web tools: 'off' strips the stubs, 'local' resolves them in-proxy, 'always' does so on the Anthropic route too
+  'cancel_test.mjs',     // A client hanging up mid-stream cancels the upstream call
+  'reload_test.mjs',     // Editing the config file reconfigures the running router
 ];
 
-let totalPass = 0, totalFail = 0, suiteFail = 0;
+let suiteFail = 0;
 
 for (const t of tests) {
   const file = path.join(__dir, t);

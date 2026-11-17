@@ -15,13 +15,12 @@
     "build:install": "make install"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20.3"
   },
   "files": [
     "router.mjs",
     "lib/",
     "router.config.example.json",
-    "start.sh",
     "tests/"
   ]
 }

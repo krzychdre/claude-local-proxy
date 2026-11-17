@@ -16,11 +16,11 @@
 //
 // Supports one or more local backends — each tier (sonnet, haiku, etc.) can
 // map to a different model or even a different server.
-// Zero dependencies. Requires Node >= 18 (uses global fetch + web streams).
+// Zero dependencies. Requires Node >= 20.3 (global fetch, web streams,
+// AbortSignal.any).
 //
 // See README.md for configuration. The implementation lives in ./lib/.
 
-import { loadConfig } from './lib/config.mjs';
 import { startServer } from './lib/server.mjs';
 
-startServer(loadConfig());
+startServer();
