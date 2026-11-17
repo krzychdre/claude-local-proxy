@@ -14,12 +14,17 @@
 
   "localBackends": [
     {
+      "tier": "opus",
+      "model": "GLM-5.3"
+    },
+    {
       "tier": "sonnet",
-      "model": "Qwen3.6-27B"
+      "model": "DeepSeek-V4.1-Flash-1017",
+      "effortMap": { "medium": "high" }
     },
     {
       "tier": "haiku",
-      "model": "Qwen3.6-27B"
+      "model": "Qwen3.8-27B"
     }
   ],
 

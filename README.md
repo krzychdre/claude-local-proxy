@@ -41,16 +41,18 @@ flowchart LR
 
    Sanity check: `curl -s localhost:8787/health`
 
-3. **Point Claude Code at it.** This repo ships a ready profile that is a copy of
-   your current `~/.claude/settings.json` with only `ANTHROPIC_BASE_URL` added:
+3. **Point Claude Code at it.** Add `ANTHROPIC_BASE_URL` to the `env` block of
+   `~/.claude/settings.json`, leaving everything else in that file as it is:
 
-   ```bash
-   cp ~/.claude/settings.json ~/.claude/settings.json.anthropic   # backup
-   cp claude-settings.localrouter.json ~/.claude/settings.json
+   ```json
+   {
+     "env": {
+       "ANTHROPIC_BASE_URL": "http://127.0.0.1:8787"
+     }
+   }
    ```
 
-   Start a new Claude Code session. To revert:
-   `cp ~/.claude/settings.json.anthropic ~/.claude/settings.json`.
+   Start a new Claude Code session. To revert, remove that line.
 
 ## Secrets
 
@@ -101,7 +103,8 @@ and a tool-id counter. All run on Node's single-threaded event loop, so
 concurrent requests interleave only at `await` points — and none of the shared
 mutations straddle one. No locks are needed.
 
-Zero dependencies. Requires Node ≥ 18 (uses global `fetch` + web streams).
+Zero dependencies. Requires Node ≥ 20.3 (uses global `fetch`, web streams and
+`AbortSignal.any`).
 
 ## Configuration (`router.config.json`)
 
@@ -116,9 +119,10 @@ Zero dependencies. Requires Node ≥ 18 (uses global `fetch` + web streams).
 | `localModel` | The model name your local server actually serves. The proxy rewrites the `model` field to this. |
 | `localApiKey` | Auth sent to the local server (Ollama ignores it; vLLM/LM Studio may need it). |
 | `localTiers` | Substrings that route to local. Default `["sonnet"]`. Add `"haiku"` to also send background tasks local. |
-| `localBackends` | Optional per-tier overrides. Array of `{ tier, model, baseUrl?, flavor?, apiKey? }`. |
+| `localEffortMap` | Renames effort levels for a local model that calls them differently, e.g. `{ "medium": "high" }`. See [Effort levels](#effort-levels). Default `{}` (pass through). |
+| `localBackends` | Optional per-tier overrides. Array of `{ tier, model, baseUrl?, flavor?, apiKey?, effortMap? }`. An entry takes effect only while its `tier` is also listed in `localTiers`, so a backend can sit in the file ready to be switched on. |
 | `webSearch` | Who serves Claude Code's WebSearch/WebFetch — see [Web tools](#web-tools-websearch--webfetch) below. |
-| `countTokens` | `"estimate"` (no Anthropic dependency for the local path) or `"anthropic"`. |
+| `countTokens` | How `count_tokens` is answered for local models. `"estimate"` (default): a chars/4 estimate made by the proxy. `"anthropic"`: forwarded to the local gateway, which must implement the Anthropic `count_tokens` endpoint. Applies to `anthropic`-flavor backends only; an `openai`-flavor backend is always estimated. |
 | `logUsage` | Log token usage (input/output + cache) already present in each response. No extra API calls/cost. Default `false`. |
 | `usageLogFile` | If set, also append one JSON record per request to this path (for per-session token tallies). |
 | `logLevel` | `debug` / `info` / `warn` / `error`. |
@@ -130,6 +134,26 @@ Any field can be overridden by env var for one-off runs: `PORT`, `LOCAL_BASE_URL
 `ANTHROPIC_UPSTREAM_URL`, `ANTHROPIC_UPSTREAM_KEY`, `ROUTER_LOG_LEVEL`,
 `ROUTER_LOG_USAGE`, `ROUTER_USAGE_LOG_FILE`, `MAX_BODY_BYTES`, `UPSTREAM_TIMEOUT_MS`,
 `WEB_SEARCH_MODE`, `SEARXNG_URL`, `CRAWL4AI_URL`, `CRAWL4AI_API_TOKEN`.
+
+## Effort levels
+
+Claude Code sends the reasoning effort it wants in `output_config.effort`, as one
+of `low`, `medium`, `high`, `xhigh`, `max`. A local model may know only some of
+those names and answer the others with a `400`. An effort map tells the proxy
+what to send instead, per level; a level the map does not list passes through
+unchanged:
+
+```json
+"localBackends": [
+  { "tier": "sonnet", "model": "my-local-model", "effortMap": { "medium": "high" } }
+]
+```
+
+`effortMap` belongs to one backend; `localEffortMap` is the same table for every
+backend that has none of its own. The value is sent as written, so a number
+works too if the model takes one. The map applies to `anthropic`-flavor
+backends, where the request is otherwise passed through as is (the `openai`
+translation does not forward an effort level at all).
 
 ## Web tools (WebSearch / WebFetch)
 
@@ -204,8 +228,8 @@ Caveats once the proxy is serving a request's web tools:
 
 ## How auth works
 
-The profile deliberately does **not** set `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`.
-That keeps your subscription OAuth in play: Claude Code attaches it, and the proxy
+Deliberately do **not** set `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` next to
+`ANTHROPIC_BASE_URL`. That keeps your subscription OAuth in play: Claude Code attaches it, and the proxy
 relays it to `api.anthropic.com` for the Opus path. The local path never sees your
 Anthropic credentials — the proxy strips them and injects `localApiKey` instead.
 
@@ -237,6 +261,18 @@ If Opus requests ever come back `401`, you have two fallbacks:
   events so Claude Code can see the failure instead of receiving a silently
   truncated response.
 
+- **Upstream errors keep their status.** A `400` or `429` answered by Anthropic
+  or by the local server reaches Claude Code as that same status (with the
+  response headers on the Anthropic path), so it retries what is retryable and
+  gives up at once on what is not. `502` and `504` mean the proxy could not
+  reach the upstream at all.
+
+- **Cancelling cancels upstream.** When Claude Code drops a request (Esc), the
+  proxy aborts its upstream call, so a local model stops generating an answer
+  nobody will read. The single binary needs to be built with a Bun whose
+  `node:http` reports a client disconnect: 1.4.4 does, 1.2.18 does not (there
+  the upstream call simply runs to its end).
+
 ## Package as a single binary
 
 The proxy compiles to a single self-contained executable — no Node, no
@@ -263,7 +299,7 @@ trailer so the binary stops running its own code (it also doesn't shrink it —
 the size isn't ELF symbols). To move it around, `make dist` xz-compresses it to
 ~24 MB; decompress on the target with `xz -d claude-router.xz`. If a small
 on-disk footprint matters more than zero dependencies, install the script as a
-Node CLI instead (`npm i -g .`, needs Node ≥18 on the box).
+Node CLI instead (`npm i -g .`, needs Node ≥ 20.3 on the box).
 
 Then run it from anywhere:
 
@@ -288,6 +324,19 @@ cp router.config.example.json ~/.config/claude-router/config.json   # then edit
 The startup banner logs which config file it loaded (or warns if none was found
 and it fell back to defaults). All env-var overrides (`PORT`, `LOCAL_BASE_URL`,
 …) still apply on top of whichever file is used.
+
+A config the proxy cannot honour stops it at startup with a message saying why:
+a file that exists but is not valid JSON, or a `localFlavor` / per-tier `flavor`
+other than `openai` and `anthropic`.
+
+**Editing the config needs no restart.** The proxy checks the file once a second
+and switches to the new config as soon as it changes; requests already in flight
+finish under the old one, and the log shows the new routing table. If the edited
+file cannot be honoured (see above; a half-written save looks the same) the edit
+is refused with an error in the log and the running config stays. Only `port`
+and `host` are fixed at startup: the proxy says so in the log and keeps
+listening where it was until restarted. Env-var overrides keep applying on top
+of every reload.
 
 ## Install as a systemd service
 
@@ -321,7 +370,7 @@ To set `LOCAL_API_KEY` via environment instead of the config file, edit the
 `Environment=` line in the service unit.
 
 For a system-level service (e.g. shared across users), copy the unit to
-`/etc/systemd/system/claude-router.service` and add `User=krzych` under
+`/etc/systemd/system/claude-router.service` and add `User=<your-user>` under
 `[Service]`.
 
 ## Test
@@ -330,6 +379,8 @@ For a system-level service (e.g. shared across users), copy the unit to
 npm test
 ```
 
-Self-contained mock upstreams — no external services needed. Three suites cover
-routing & model rewrite, the OpenAI translation path (streaming + tool calls),
-auth stripping, `count_tokens`, and token-usage logging.
+Self-contained mock upstreams, no external services needed. The suites cover
+routing & model rewrite, per-tier backends, the OpenAI translation path
+(streaming + tool calls), the transparent Anthropic path (status and headers),
+auth stripping, `count_tokens`, token-usage logging, the web tools in all three
+modes, and cancellation of the upstream call when the client hangs up.

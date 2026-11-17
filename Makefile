@@ -1,7 +1,8 @@
 # Makefile for the Claude Code model-router single-binary build + service.
 #
-# The router is one zero-dependency .mjs; `bun --compile` bakes it together with
-# the bun runtime into a self-contained executable (no Node needed on target).
+# The router is zero-dependency .mjs (router.mjs plus lib/); `bun --compile` bakes
+# it together with the bun runtime into a self-contained executable (no Node
+# needed on target).
 #
 #   make            # build      -> dist/claude-router
 #   make install    # build + install binary, config, and the systemd --user service

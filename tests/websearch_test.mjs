@@ -1,13 +1,7 @@
 // Server-side web tools: 'off' strips the stubs on the local route, 'local'
 // resolves them in-proxy for local models only, 'always' does so on the
 // Anthropic route too.
-import http from 'node:http';
-import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
-
-const __dir = path.dirname(fileURLToPath(import.meta.url));
-const ROUTER = path.join(__dir, '..', 'router.mjs');
+import { mockServer, startRouter, sseEvents, ok, finish } from './helpers.mjs';
 
 const WEB_SEARCH_STUB = { type: 'web_search_20250305', name: 'web_search', max_uses: 5 };
 const WEB_FETCH_STUB = { type: 'web_fetch_20250910', name: 'web_fetch', max_uses: 5 };
@@ -23,35 +17,32 @@ const REMOTE_MODEL = 'claude-opus-4-6';
 // never offered, POBIERZ makes it call web_fetch, otherwise it searches when
 // search is on offer.
 const seen = [];
-const openai = http.createServer((req, res) => {
-  let b = ''; req.on('data', c => b += c); req.on('end', () => {
-    const body = JSON.parse(b || '{}');
-    seen.push(body);
-    const answered = (body.messages || []).some(m => m.role === 'tool');
-    const asked = JSON.stringify(body.messages || []);
-    const offersSearch = (body.tools || []).some(t => t.function?.name === 'web_search');
-    const call = (name, args) => JSON.stringify({
-      id: 'oai_1',
-      choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: `call_${name}`, type: 'function', function: { name, arguments: args } }] }, finish_reason: 'tool_calls' }],
-      usage: { prompt_tokens: 10, completion_tokens: 5 },
-    });
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    if (!answered) {
-      if (asked.includes('HALUCYNACJA')) return res.end(call('web_fetch', '{"url":"https://pypi.org/project/x/"}'));
-      if (asked.includes('POBIERZ')) return res.end(call('web_fetch', '{"url":"https://example.com"}'));
-      if (offersSearch) return res.end(call('web_search', '{"query":"crawl4ai docs"}'));
-    }
-    res.end(JSON.stringify({
-      id: 'oai_2',
-      choices: [{ message: { role: 'assistant', content: 'Odpowiedź po wyszukaniu.' }, finish_reason: 'stop' }],
-      usage: { prompt_tokens: 30, completion_tokens: 9 },
-    }));
+const openai = await mockServer((req, res, body) => {
+  seen.push(body);
+  const answered = (body.messages || []).some(m => m.role === 'tool');
+  const asked = JSON.stringify(body.messages || []);
+  const offersSearch = (body.tools || []).some(t => t.function?.name === 'web_search');
+  const call = (name, args) => JSON.stringify({
+    id: 'oai_1',
+    choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: `call_${name}`, type: 'function', function: { name, arguments: args } }] }, finish_reason: 'tool_calls' }],
+    usage: { prompt_tokens: 10, completion_tokens: 5 },
   });
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  if (!answered) {
+    if (asked.includes('HALUCYNACJA')) return res.end(call('web_fetch', '{"url":"https://pypi.org/project/x/"}'));
+    if (asked.includes('POBIERZ')) return res.end(call('web_fetch', '{"url":"https://example.com"}'));
+    if (offersSearch) return res.end(call('web_search', '{"query":"crawl4ai docs"}'));
+  }
+  res.end(JSON.stringify({
+    id: 'oai_2',
+    choices: [{ message: { role: 'assistant', content: 'Odpowiedź po wyszukaniu.' }, finish_reason: 'stop' }],
+    usage: { prompt_tokens: 30, completion_tokens: 9 },
+  }));
 });
 
 // --- mock SearXNG ---
 let lastQuery = null;
-const searx = http.createServer((req, res) => {
+const searx = await mockServer((req, res) => {
   const u = new URL(req.url, 'http://x');
   lastQuery = { q: u.searchParams.get('q'), format: u.searchParams.get('format'), path: u.pathname };
   res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -67,92 +58,81 @@ const searx = http.createServer((req, res) => {
 // once the tool_result is back. The first reply carries a thinking block, so the
 // buffered SSE replay can be checked for it.
 const anthSeen = [];
-const anthropic = http.createServer((req, res) => {
-  let b = ''; req.on('data', c => b += c); req.on('end', () => {
-    const body = JSON.parse(b || '{}');
-    anthSeen.push({ url: req.url, body });
-    const answered = (body.messages || []).some(m => Array.isArray(m.content)
-      && m.content.some(c => c.type === 'tool_result'));
-    const offersSearch = (body.tools || []).some(t => t.name === 'web_search' && t.input_schema);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    if (offersSearch && !answered) {
-      return res.end(JSON.stringify({
-        id: 'msg_1', type: 'message', role: 'assistant', model: body.model,
-        content: [
-          { type: 'thinking', thinking: 'Muszę poszukać.', signature: 'sig-abc' },
-          { type: 'tool_use', id: 'tu_1', name: 'web_search', input: { query: 'crawl4ai docs' } },
-        ],
-        stop_reason: 'tool_use',
-        usage: { input_tokens: 11, output_tokens: 7, cache_read_input_tokens: 100 },
-      }));
-    }
-    res.end(JSON.stringify({
-      id: 'msg_2', type: 'message', role: 'assistant', model: body.model,
+const anthropic = await mockServer((req, res, body) => {
+  anthSeen.push({ url: req.url, body });
+  const answered = (body.messages || []).some(m => Array.isArray(m.content)
+    && m.content.some(c => c.type === 'tool_result'));
+  const offersSearch = (body.tools || []).some(t => t.name === 'web_search' && t.input_schema);
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  if (offersSearch && !answered) {
+    return res.end(JSON.stringify({
+      id: 'msg_1', type: 'message', role: 'assistant', model: body.model,
       content: [
-        { type: 'thinking', thinking: 'Mam wyniki.', signature: 'sig-final' },
-        { type: 'text', text: 'Odpowiedź z Anthropic.' },
+        { type: 'thinking', thinking: 'Muszę poszukać.', signature: 'sig-abc' },
+        { type: 'tool_use', id: 'tu_1', name: 'web_search', input: { query: 'crawl4ai docs' } },
       ],
-      stop_reason: 'end_turn',
-      usage: { input_tokens: 40, output_tokens: 6, cache_read_input_tokens: 100 },
+      stop_reason: 'tool_use',
+      usage: { input_tokens: 11, output_tokens: 7, cache_read_input_tokens: 100 },
     }));
-  });
+  }
+  res.end(JSON.stringify({
+    id: 'msg_2', type: 'message', role: 'assistant', model: body.model,
+    content: [
+      { type: 'thinking', thinking: 'Mam wyniki.', signature: 'sig-final' },
+      { type: 'text', text: 'Odpowiedź z Anthropic.' },
+    ],
+    stop_reason: 'end_turn',
+    usage: { input_tokens: 40, output_tokens: 6, cache_read_input_tokens: 100 },
+  }));
 });
 
 // --- mock crawl4ai ---
 let lastFetch = null;
-const crawl = http.createServer((req, res) => {
-  let b = ''; req.on('data', c => b += c); req.on('end', () => {
-    lastFetch = { path: req.url, body: JSON.parse(b || '{}'), auth: req.headers.authorization };
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ markdown: '# Example Domain\n\nTreść pobranej strony.' }));
-  });
+const crawl = await mockServer((req, res, body) => {
+  lastFetch = { path: req.url, body, auth: req.headers.authorization };
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ markdown: '# Example Domain\n\nTreść pobranej strony.' }));
 });
 
-await new Promise(r => openai.listen(0, r));
-await new Promise(r => searx.listen(0, r));
-await new Promise(r => anthropic.listen(0, r));
-await new Promise(r => crawl.listen(0, r));
-const OAI = openai.address().port, SEARX = searx.address().port;
-const ANTH = anthropic.address().port, CRAWL = crawl.address().port;
-
 const baseEnv = {
-  ...process.env,
-  ROUTER_CONFIG: '/dev/null',
-  LOCAL_BASE_URL: `http://127.0.0.1:${OAI}`,
+  LOCAL_BASE_URL: openai,
   LOCAL_FLAVOR: 'openai',
   LOCAL_MODEL: 'my-local-model',
   LOCAL_TIERS: 'sonnet',
   ROUTER_LOG_LEVEL: 'error',
-  ANTHROPIC_UPSTREAM_URL: `http://127.0.0.1:${ANTH}`,
+  ANTHROPIC_UPSTREAM_URL: anthropic,
   // Force a key so the OAuth fallback never touches the real credentials file.
   ANTHROPIC_UPSTREAM_KEY: 'test-key',
 };
-const spawnRouter = (port, env) => spawn('node', [ROUTER], {
-  env: { ...baseEnv, PORT: String(port), ...env }, stdio: ['ignore', 'inherit', 'inherit'],
-});
-
-const offProc = spawnRouter(8801, { WEB_SEARCH_MODE: 'off' });
-const locProc = spawnRouter(8802, { WEB_SEARCH_MODE: 'local', SEARXNG_URL: `http://127.0.0.1:${SEARX}` });
-const alwProc = spawnRouter(8804, { WEB_SEARCH_MODE: 'always', SEARXNG_URL: `http://127.0.0.1:${SEARX}` });
+const off = await startRouter({ ...baseEnv, WEB_SEARCH_MODE: 'off' });
+const local = await startRouter({ ...baseEnv, WEB_SEARCH_MODE: 'local', SEARXNG_URL: searx });
+const always = await startRouter({ ...baseEnv, WEB_SEARCH_MODE: 'always', SEARXNG_URL: searx });
 // Both endpoints configured, so web_fetch is served too.
-const bothProc = spawnRouter(8806, {
+const both = await startRouter({
+  ...baseEnv,
   WEB_SEARCH_MODE: 'local',
-  SEARXNG_URL: `http://127.0.0.1:${SEARX}`,
-  CRAWL4AI_URL: `http://127.0.0.1:${CRAWL}`,
+  SEARXNG_URL: searx,
+  CRAWL4AI_URL: crawl,
   CRAWL4AI_API_TOKEN: 'tok-123',
 });
-await new Promise(r => setTimeout(r, 700));
+// An Anthropic-flavor local gateway (the Anthropic mock speaks that protocol)
+// whose model has its own name for the 'medium' effort level.
+const localAnth = await startRouter(
+  { ...baseEnv, LOCAL_BASE_URL: anthropic, LOCAL_FLAVOR: 'anthropic', WEB_SEARCH_MODE: 'local', SEARXNG_URL: searx },
+  { localEffortMap: { medium: 'high' } },
+);
+// No endpoint configured in either active mode.
+const localBare = await startRouter({ ...baseEnv, WEB_SEARCH_MODE: 'local' });
+const alwaysBare = await startRouter({ ...baseEnv, WEB_SEARCH_MODE: 'always' });
 
-let pass = 0, fail = 0;
-const ok = (n, c) => { c ? pass++ : fail++; console.log((c ? 'PASS' : 'FAIL') + ' ' + n); };
-const post = (port, body) => fetch(`http://127.0.0.1:${port}/v1/messages`, {
+const post = (router, body) => fetch(`${router.base}/v1/messages`, {
   method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
 });
 
 // 1) mode=off — the stub never reaches the local backend, client tools survive
 {
   seen.length = 0;
-  const r = await post(8801, {
+  const r = await post(off, {
     model: 'claude-sonnet-4-6', max_tokens: 50,
     tools: [WEB_SEARCH_STUB, CLIENT_TOOL],
     messages: [{ role: 'user', content: 'szukaj' }],
@@ -167,7 +147,7 @@ const post = (port, body) => fetch(`http://127.0.0.1:${port}/v1/messages`, {
 // 2) mode=off with nothing but the stub — tools and tool_choice both go away
 {
   seen.length = 0;
-  await post(8801, {
+  await post(off, {
     model: 'claude-sonnet-4-6', max_tokens: 50,
     tools: [WEB_SEARCH_STUB], tool_choice: { type: 'auto' },
     messages: [{ role: 'user', content: 'szukaj' }],
@@ -179,7 +159,7 @@ const post = (port, body) => fetch(`http://127.0.0.1:${port}/v1/messages`, {
 // 3) mode=off leaves a request without web stubs completely alone
 {
   seen.length = 0;
-  await post(8801, {
+  await post(off, {
     model: 'claude-sonnet-4-6', max_tokens: 50,
     tools: [CLIENT_TOOL], messages: [{ role: 'user', content: 'pogoda' }],
   });
@@ -189,7 +169,7 @@ const post = (port, body) => fetch(`http://127.0.0.1:${port}/v1/messages`, {
 // 4) mode=local — proxy runs the search, loops, and streams back only the answer
 {
   seen.length = 0; lastQuery = null;
-  const r = await post(8802, {
+  const r = await post(local, {
     model: 'claude-sonnet-4-6', max_tokens: 50, stream: true,
     tools: [WEB_SEARCH_STUB],
     messages: [{ role: 'user', content: 'znajdź dokumentację crawl4ai' }],
@@ -212,9 +192,7 @@ const post = (port, body) => fetch(`http://127.0.0.1:${port}/v1/messages`, {
 // 5) mode=local without a SearXNG URL degrades to stripping, not to failing
 {
   seen.length = 0;
-  const proc = spawnRouter(8803, { WEB_SEARCH_MODE: 'local' });
-  await new Promise(r => setTimeout(r, 700));
-  const r = await post(8803, {
+  const r = await post(localBare, {
     model: 'claude-sonnet-4-6', max_tokens: 50,
     tools: [WEB_SEARCH_STUB, CLIENT_TOOL], messages: [{ role: 'user', content: 'szukaj' }],
   });
@@ -222,13 +200,12 @@ const post = (port, body) => fetch(`http://127.0.0.1:${port}/v1/messages`, {
   const names = (seen[0]?.tools || []).map(t => t.function.name);
   ok('local without endpoint: falls back to stripping', !names.includes('web_search') && names.includes('get_weather'));
   ok('local without endpoint: still answers', j.content?.[0]?.text === 'Odpowiedź po wyszukaniu.');
-  proc.kill();
 }
 
 // 6) mode=local leaves the Anthropic route alone — its own web tools still run
 {
   anthSeen.length = 0;
-  const r = await post(8802, {
+  const r = await post(local, {
     model: REMOTE_MODEL, max_tokens: 50,
     tools: [WEB_SEARCH_STUB, CLIENT_TOOL],
     messages: [{ role: 'user', content: 'szukaj' }],
@@ -244,7 +221,7 @@ const post = (port, body) => fetch(`http://127.0.0.1:${port}/v1/messages`, {
 // 7) mode=always — the proxy serves the web tools on the Anthropic route too
 {
   anthSeen.length = 0; lastQuery = null;
-  const r = await post(8804, {
+  const r = await post(always, {
     model: REMOTE_MODEL, max_tokens: 50, stream: true,
     tools: [WEB_SEARCH_STUB, WEB_FETCH_STUB, CLIENT_TOOL],
     messages: [{ role: 'user', content: 'znajdź dokumentację crawl4ai' }],
@@ -274,21 +251,22 @@ const post = (port, body) => fetch(`http://127.0.0.1:${port}/v1/messages`, {
     /"type":"thinking_delta"/.test(txt) && /"signature":"sig-final"/.test(txt));
   ok('always: the intermediate search round is not replayed to the client',
     !/sig-abc/.test(txt));
-  ok('always: usage summed across rounds', /"input_tokens":51/.test(txt) && /"output_tokens":13/.test(txt));
+  const events = sseEvents(txt);
+  const startUsage = events.find(e => e.type === 'message_start').message.usage;
+  ok('always: usage summed across rounds',
+    startUsage.input_tokens === 51 && events.find(e => e.type === 'message_delta').usage.output_tokens === 13);
+  ok('always: cache tokens survive the SSE replay', startUsage.cache_read_input_tokens === 200);
 }
 
 // 8) mode=always with no endpoint configured leaves the Anthropic route untouched
 {
   anthSeen.length = 0;
-  const proc = spawnRouter(8805, { WEB_SEARCH_MODE: 'always' });
-  await new Promise(r => setTimeout(r, 700));
-  await post(8805, {
+  await post(alwaysBare, {
     model: REMOTE_MODEL, max_tokens: 50,
     tools: [WEB_SEARCH_STUB], messages: [{ role: 'user', content: 'szukaj' }],
   });
   ok('always without endpoint: Anthropic keeps its native stub',
     anthSeen[0]?.body?.tools?.[0]?.type === 'web_search_20250305' && anthSeen.length === 1);
-  proc.kill();
 }
 
 // 9) A tool the model was never offered is answered here, not handed to the
@@ -297,7 +275,7 @@ const post = (port, body) => fetch(`http://127.0.0.1:${port}/v1/messages`, {
 //    the invented call was passed straight through.
 {
   seen.length = 0;
-  const r = await post(8802, {
+  const r = await post(local, {
     model: 'claude-sonnet-4-6', max_tokens: 50,
     tools: [WEB_SEARCH_STUB],
     messages: [{ role: 'user', content: 'HALUCYNACJA: wymyśl narzędzie' }],
@@ -315,7 +293,7 @@ const post = (port, body) => fetch(`http://127.0.0.1:${port}/v1/messages`, {
 // 10) With crawl4ai configured, web_fetch is advertised and actually runs
 {
   seen.length = 0; lastFetch = null;
-  const r = await post(8806, {
+  const r = await post(both, {
     model: 'claude-sonnet-4-6', max_tokens: 50,
     tools: [WEB_SEARCH_STUB, WEB_FETCH_STUB],
     messages: [{ role: 'user', content: 'POBIERZ https://example.com' }],
@@ -334,7 +312,21 @@ const post = (port, body) => fetch(`http://127.0.0.1:${port}/v1/messages`, {
   ok('web_fetch: client sees only the answer', j.content?.[0]?.text === 'Odpowiedź po wyszukaniu.');
 }
 
-console.log(`\n${pass} passed, ${fail} failed`);
-offProc.kill(); locProc.kill(); alwProc.kill(); bothProc.kill();
-openai.close(); searx.close(); anthropic.close(); crawl.close();
-process.exit(fail ? 1 : 0);
+// 11) An Anthropic-flavor local gateway gets the request in its own dialect on
+//     every round of the in-proxy loop: its model name and its effort level
+{
+  anthSeen.length = 0;
+  const r = await post(localAnth, {
+    model: 'claude-sonnet-4-6', max_tokens: 50,
+    tools: [WEB_SEARCH_STUB], output_config: { effort: 'medium' },
+    messages: [{ role: 'user', content: 'znajdź dokumentację crawl4ai' }],
+  });
+  const j = await r.json();
+  ok('local anthropic flavor: two rounds, answer delivered',
+    anthSeen.length === 2 && j.content.some(c => c.text === 'Odpowiedź z Anthropic.'));
+  ok('local anthropic flavor: model and effort rewritten on every round',
+    anthSeen.every(s => s.body.model === 'my-local-model' && s.body.output_config.effort === 'high'));
+  ok('local anthropic flavor: client still sees its own model name', j.model === 'claude-sonnet-4-6');
+}
+
+finish();
